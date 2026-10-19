@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Game Template</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0d1220;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: system-ui, sans-serif;
+  }
+  #c { display: block; width: 100%; height: 100%; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+  'use strict';
+
+  // ===== 1. UTILS =====
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  let _seed = Date.now() >>> 0;
+  function rnd() {
+    _seed = (_seed + 0x6D2B79F5) >>> 0;
+    let t = _seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // ===== 2. CANVAS / RESIZE =====
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const r = canvas.getBoundingClientRect();
+    canvas.width  = Math.round(r.width  * dpr);
+    canvas.height = Math.round(r.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    W = r.width; H = r.height;
+    layoutButtons();
+    if (world) world.player.y = H - 60;
+  }
+  addEventListener('resize', resize);
+  addEventListener('orientationchange', resize);
+
+  function localPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  // ===== 3. CONSTANTS =====
+  const COLORS = {
+    bg: '#0d1220',
+    player: '#4ade80',
+    item: '#facc15',
+    text: '#e5e7eb',
+    dim: '#94a3b8',
+    btn: 'rgba(255,255,255,0.08)',
+    danger: '#ef4444',
+  };
+  const STEP = 1 / 120;
+  const MISS_LIMIT = 3;
+  const PLAYER_SIZE = 40;
+  const PLAYER_SPEED = 480;
+  const OVER_DELAY_MS = 500;
+
+  // ===== 4. STATE =====
+  const game = {
+    state: 'menu',   // 'menu' | 'playing' | 'paused' | 'over'
+    score: 0,
+    best: 0,
+    t: 0,
+    overAt: 0,
+  };
+
+  // ===== 5. INPUT =====
+  const keys = new Set();
+  const BLOCK_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ']);
+  let pointerTargetX = null;
+
+  addEventListener('keydown', (e) => {
+    if (BLOCK_KEYS.has(e.key)) e.preventDefault();
+    keys.add(e.code);
+    if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
+    if (e.code === 'KeyM') toggleMute();
+    if (e.code === 'Enter' || e.code === 'Space') confirmAction();
+  }, { passive: false });
+  addEventListener('keyup', (e) => keys.delete(e.code));
+  addEventListener('blur', () => { keys.clear(); pointerTargetX = null; });
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const p = localPos(e);
+    if (hitButton(p.x, p.y, 'pause')) {
+      if (game.state === 'playing' || game.state === 'paused') togglePause();
+      return;
+    }
+    if (hitButton(p.x, p.y, 'mute')) { toggleMute(); return; }
+    if (game.state === 'menu' || (game.state === 'over' && canRestart())) {
+      startGame(); return;
+    }
+    if (game.state === 'playing') pointerTargetX = p.x;
+  }, { passive: true });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (game.state !== 'playing') return;
+    if (e.buttons === 0 && e.pointerType !== 'touch') return;
+    pointerTargetX = localPos(e).x;
+  }, { passive: true });
+
+  canvas.addEventListener('pointerup',     () => { pointerTargetX = null; });
+  canvas.addEventListener('pointercancel', () => { pointerTargetX = null; });
+
+  // ===== 6. AUDIO =====
+  let actx = null;
+  let muted = false;
+
+  function beep(freq = 440, dur = 0.08, type = 'square', gain = 0.06) {
+    if (muted) return;
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
+      const t0 = actx.currentTime;
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.type = type;
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(gain, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(actx.destination);
+      o.start(t0);
+      o.stop(t0 + dur);
+    } catch (_) { /* звук опционален */ }
+  }
+  function toggleMute() { muted = !muted; if (!muted) beep(660, 0.06); }
+
+  // ===== 7. WORLD — заменяйте логику ЗДЕСЬ =====
+  const world = {
+    player: { x: 0, y: 0 },
+    items: [],
+    spawnTimer: 0,
+    misses: 0,
+  };
+
+  function resetWorld() {
+    world.player.x = W / 2;
+    world.player.y = H - 60;
+    world.items.length = 0;
+    world.spawnTimer = 0.4;
+    world.misses = 0;
+  }
+
+  function updateWorld(dt) {
+    game.t += dt;
+
+    // Движение игрока: клавиши + тап/перетаскивание
+    let dir = 0;
+    if (keys.has('ArrowLeft')  || keys.has('KeyA')) dir -= 1;
+    if (keys.has('ArrowRight') || keys.has('KeyD')) dir += 1;
+    if (pointerTargetX !== null) {
+      const dx = pointerTargetX - world.player.x;
+      if (Math.abs(dx) > 6) dir = Math.sign(dx);
+    }
+    world.player.x = clamp(
+      world.player.x + dir * PLAYER_SPEED * dt,
+      PLAYER_SIZE / 2,
+      W - PLAYER_SIZE / 2
+    );
+    world.player.y = H - 60;
+
+    // Спавн
+    world.spawnTimer -= dt;
+    if (world.spawnTimer <= 0) {
+      const interval = Math.max(0.28, 0.9 - game.score * 0.008);
+      world.spawnTimer = interval;
+      world.items.push({
+        x: 24 + rnd() * (W - 48),
+        y: -20,
+        r: 11 + rnd() * 5,
+        vy: 140 + rnd() * 80 + game.score * 2.5,
+      });
+    }
+
+    // Падение, коллизия, промах
+    for (let i = world.items.length - 1; i >= 0; i--) {
+      const it = world.items[i];
+      it.y += it.vy * dt;
+
+      const px = world.player.x, py = world.player.y, h = PLAYER_SIZE / 2;
+      if (it.y + it.r > py - h && it.y - it.r < py + h &&
+          it.x + it.r > px - h && it.x - it.r < px + h) {
+        game.score += 10;
+        beep(600 + rnd() * 200, 0.06, 'square', 0.05);
+        world.items.splice(i, 1);
+        continue;
+      }
+      if (it.y - it.r > H) {
+        world.misses++;
+        beep(140, 0.12, 'sawtooth', 0.05);
+        world.items.splice(i, 1);
+        if (world.misses >= MISS_LIMIT) { endGame(); return; }
+      }
+    }
+  }
+
+  // ===== 8. LOOP =====
+  let last = performance.now();
+  let acc = 0;
+
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;              // клип: смена таба, тормоза
+    if (game.state === 'playing') {
+      acc += dt;
+      let guard = 0;
+      while (acc >= STEP && guard++ < 8) {
+        updateWorld(STEP);
+        acc -= STEP;
+        if (game.state !== 'playing') break;
+      }
+    } else {
+      acc = 0;
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ===== 9. UI =====
+  const buttons = [
+    { id: 'pause', x: 0, y: 0, w: 44, h: 44 },
+    { id: 'mute',  x: 0, y: 0, w: 44, h: 44 },
+  ];
+
+  function layoutButtons() {
+    const pad = 12, size = 44, gap = 8;
+    buttons[0].x = W - pad - size * 2 - gap;
+    buttons[0].y = pad; buttons[0].w = size; buttons[0].h = size;
+    buttons[1].x = W - pad - size;
+    buttons[1].y = pad; buttons[1].w = size; buttons[1].h = size;
+  }
+
+  function hitButton(x, y, id) {
+    const b = buttons.find(b => b.id === id);
+    return !!b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawButtons() {
+    for (const b of buttons) {
+      ctx.fillStyle = COLORS.btn;
+      roundRect(b.x, b.y, b.w, b.h, 10);
+      ctx.fill();
+      ctx.fillStyle = COLORS.text;
+      ctx.font = '22px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const label = b.id === 'mute'
+        ? (muted ? '🔇' : '🔊')
+        : (game.state === 'paused' ? '▶' : '⏸');
+      ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+    }
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  function drawMenu() {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.text;
+    ctx.font = 'bold 32px system-ui, sans-serif';
+    ctx.fillText('Собери звёзды', W / 2, H / 2 - 40);
+    ctx.fillStyle = COLORS.dim;
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('Стрелки / A, D · тап по экрану', W / 2, H / 2);
+    ctx.fillStyle = COLORS.text;
+    ctx.font = 'bold 20px system-ui, sans-serif';
+    ctx.fillText('Нажми, чтобы начать', W / 2, H / 2 + 50);
+    drawButtons();
+  }
+
+  function drawOver() {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.text;
+    ctx.font = 'bold 30px system-ui, sans-serif';
+    ctx.fillText('Игра окончена', W / 2, H / 2 - 40);
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('Счёт: ' + game.score, W / 2, H / 2 + 4);
+    ctx.fillStyle = COLORS.dim;
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('Рекорд: ' + game.best, W / 2, H / 2 + 32);
+    ctx.fillStyle = COLORS.text;
+    ctx.font = 'bold 18px system-ui, sans-serif';
+    ctx.fillText('Нажми, чтобы сыграть заново', W / 2, H / 2 + 72);
+    drawButtons();
+  }
+
+  function drawPause() {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.text;
+    ctx.font = 'bold 28px system-ui, sans-serif';
+    ctx.fillText('Пауза', W / 2, H / 2 - 10);
+    ctx.fillStyle = COLORS.dim;
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('P или ▶ — продолжить', W / 2, H / 2 + 26);
+    drawButtons();
+  }
+
+  function render() {
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    if (game.state === 'menu') { drawMenu(); return; }
+    if (game.state === 'over') { drawOver(); return; }
+
+    // HUD
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 20px system-ui, sans-serif';
+    ctx.fillText('Счёт: ' + game.score, 12, 32);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = (world.misses >= MISS_LIMIT - 1) ? COLORS.danger : COLORS.dim;
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('Промахи: ' + world.misses + ' / ' + MISS_LIMIT, W - 108, 32);
+
+    // Игрок
+    ctx.fillStyle = COLORS.player;
+    ctx.fillRect(
+      world.player.x - PLAYER_SIZE / 2,
+      world.player.y - PLAYER_SIZE / 2,
+      PLAYER_SIZE, PLAYER_SIZE
+    );
+
+    // Предметы
+    for (const it of world.items) {
+      ctx.fillStyle = COLORS.item;
+      ctx.beginPath();
+      ctx.arc(it.x, it.y, it.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    drawButtons();
+    if (game.state === 'paused') drawPause();
+  }
+
+  // ===== 10. FLOW =====
+  function canRestart() {
+    return performance.now() - game.overAt > OVER_DELAY_MS;
+  }
+
+  function startGame() {
+    game.state = 'playing';
+    game.score = 0;
+    game.t = 0;
+    resetWorld();
+    last = performance.now();
+    acc = 0;
+    beep(880, 0.08, 'triangle', 0.05);
+  }
+
+  function endGame() {
+    game.state = 'over';
+    game.overAt = performance.now();
+    if (game.score > game.best) game.best = game.score;
+    beep(220, 0.25, 'sawtooth', 0.06);
+  }
+
+  function togglePause() {
+    if (game.state === 'playing') {
+      game.state = 'paused';
+    } else if (game.state === 'paused') {
+      game.state = 'playing';
+      last = performance.now();
+      acc = 0;
+    }
+  }
+
+  function confirmAction() {
+    if (game.state === 'menu' || (game.state === 'over' && canRestart())) startGame();
+    else if (game.state === 'paused') togglePause();
+  }
+
+  // Авто-пауза при уходе со вкладки
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && game.state === 'playing') togglePause();
+  });
+
+  // ===== BOOT =====
+  resize();
+  resetWorld();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
