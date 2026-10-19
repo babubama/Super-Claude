@@ -67,6 +67,7 @@
     text: '#e5e7eb',
     dim: '#94a3b8',
     btn: 'rgba(255,255,255,0.08)',
+    btnBorder: 'rgba(255,255,255,0.12)',
     danger: '#ef4444',
   };
   const STEP = 1 / 120;
@@ -236,6 +237,91 @@
     requestAnimationFrame(frame);
   }
 
+  // ===== 9a. ICONS (векторные, рисуются кодом, без эмодзи и файлов) =====
+  // Все иконки центрированы в (cx, cy), размер s — примерная сторона в px.
+  function drawIcon(name, cx, cy, s, color) {
+    const h = s / 2;
+    ctx.save();
+    ctx.fillStyle = color || COLORS.text;
+    ctx.strokeStyle = color || COLORS.text;
+    ctx.lineWidth = Math.max(2, s * 0.09);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+
+    switch (name) {
+      case 'pause':
+        ctx.rect(cx - h * 0.45, cy - h * 0.6, h * 0.32, h * 1.2);
+        ctx.rect(cx + h * 0.13, cy - h * 0.6, h * 0.32, h * 1.2);
+        ctx.fill();
+        break;
+
+      case 'play':
+        ctx.moveTo(cx - h * 0.35, cy - h * 0.6);
+        ctx.lineTo(cx + h * 0.6, cy);
+        ctx.lineTo(cx - h * 0.35, cy + h * 0.6);
+        ctx.closePath();
+        ctx.fill();
+        break;
+
+      case 'soundOn':
+      case 'soundOff': {
+        // корпус динамика
+        ctx.moveTo(cx - h * 0.7, cy - h * 0.22);
+        ctx.lineTo(cx - h * 0.35, cy - h * 0.22);
+        ctx.lineTo(cx - h * 0.05, cy - h * 0.55);
+        ctx.lineTo(cx - h * 0.05, cy + h * 0.55);
+        ctx.lineTo(cx - h * 0.35, cy + h * 0.22);
+        ctx.lineTo(cx - h * 0.7, cy + h * 0.22);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        if (name === 'soundOn') {
+          ctx.arc(cx - h * 0.05, cy, h * 0.45, -Math.PI / 3, Math.PI / 3);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(cx - h * 0.05, cy, h * 0.8, -Math.PI / 3, Math.PI / 3);
+          ctx.stroke();
+        } else {
+          ctx.moveTo(cx + h * 0.3, cy - h * 0.35);
+          ctx.lineTo(cx + h * 0.8, cy + h * 0.35);
+          ctx.moveTo(cx + h * 0.8, cy - h * 0.35);
+          ctx.lineTo(cx + h * 0.3, cy + h * 0.35);
+          ctx.stroke();
+        }
+        break;
+      }
+
+      case 'star': {
+        for (let i = 0; i < 10; i++) {
+          const r = i % 2 === 0 ? h * 0.9 : h * 0.4;
+          const a = -Math.PI / 2 + (i * Math.PI) / 5;
+          const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill();
+        break;
+      }
+
+      case 'heart':
+        ctx.moveTo(cx, cy + h * 0.8);
+        ctx.bezierCurveTo(cx - h * 1.1, cy, cx - h * 0.6, cy - h * 0.9, cx, cy - h * 0.3);
+        ctx.bezierCurveTo(cx + h * 0.6, cy - h * 0.9, cx + h * 1.1, cy, cx, cy + h * 0.8);
+        ctx.fill();
+        break;
+
+      case 'cross':
+        ctx.moveTo(cx - h * 0.5, cy - h * 0.5);
+        ctx.lineTo(cx + h * 0.5, cy + h * 0.5);
+        ctx.moveTo(cx + h * 0.5, cy - h * 0.5);
+        ctx.lineTo(cx - h * 0.5, cy + h * 0.5);
+        ctx.stroke();
+        break;
+    }
+    ctx.restore();
+  }
+
   // ===== 9. UI =====
   const buttons = [
     { id: 'pause', x: 0, y: 0, w: 44, h: 44 },
@@ -267,19 +353,18 @@
 
   function drawButtons() {
     for (const b of buttons) {
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
       ctx.fillStyle = COLORS.btn;
-      roundRect(b.x, b.y, b.w, b.h, 10);
+      roundRect(b.x, b.y, b.w, b.h, 12);
       ctx.fill();
-      ctx.fillStyle = COLORS.text;
-      ctx.font = '22px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const label = b.id === 'mute'
-        ? (muted ? '🔇' : '🔊')
-        : (game.state === 'paused' ? '▶' : '⏸');
-      ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+      ctx.strokeStyle = COLORS.btnBorder;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      let icon;
+      if (b.id === 'mute') icon = muted ? 'soundOff' : 'soundOn';
+      else icon = game.state === 'paused' ? 'play' : 'pause';
+      drawIcon(icon, cx, cy, 20, COLORS.text);
     }
-    ctx.textBaseline = 'alphabetic';
   }
 
   function drawMenu() {
@@ -321,7 +406,7 @@
     ctx.fillText('Пауза', W / 2, H / 2 - 10);
     ctx.fillStyle = COLORS.dim;
     ctx.font = '16px system-ui, sans-serif';
-    ctx.fillText('P или ▶ — продолжить', W / 2, H / 2 + 26);
+    ctx.fillText('P или Esc — продолжить', W / 2, H / 2 + 26);
     drawButtons();
   }
 
@@ -332,15 +417,14 @@
     if (game.state === 'menu') { drawMenu(); return; }
     if (game.state === 'over') { drawOver(); return; }
 
-    // HUD
+    // HUD: счёт слева сверху, промахи — под ним, чтобы не перекрывались кнопками
     ctx.fillStyle = COLORS.text;
     ctx.textAlign = 'left';
     ctx.font = 'bold 20px system-ui, sans-serif';
     ctx.fillText('Счёт: ' + game.score, 12, 32);
-    ctx.textAlign = 'right';
     ctx.fillStyle = (world.misses >= MISS_LIMIT - 1) ? COLORS.danger : COLORS.dim;
     ctx.font = '16px system-ui, sans-serif';
-    ctx.fillText('Промахи: ' + world.misses + ' / ' + MISS_LIMIT, W - 108, 32);
+    ctx.fillText('Промахи: ' + world.misses + ' / ' + MISS_LIMIT, 12, 58);
 
     // Игрок
     ctx.fillStyle = COLORS.player;
